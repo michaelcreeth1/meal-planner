@@ -18,6 +18,15 @@ import {
   splitCsv
 } from "../shared/domain.js";
 import { AppDatabase } from "./db/database.js";
+import {
+  HomeAssistantConfigurationError,
+  HomeAssistantRequestError,
+  getHomeAssistantShoppingList,
+  getHomeAssistantTodoEntityId,
+  getHomeAssistantUrl,
+  isHomeAssistantConfigured,
+  sendShoppingListToHomeAssistant
+} from "./services/homeAssistantShoppingList.js";
 import { createMealAIService, getMealAIProvider } from "./services/mealAIService.js";
 import { validateMealGenerationResponse } from "./services/mealValidation.js";
 import { buildShoppingList } from "./services/shoppingListBuilder.js";
@@ -46,6 +55,7 @@ const FoodPreferenceInputSchema = z.object({
 const GenerateMealsInputSchema = z.object({
   numberOfMeals: z.number().int().min(1).max(7),
   maxCookTimeMinutes: z.number().int().positive().nullable(),
+  guidance: z.string().default(""),
   availableIngredients: z.array(z.string()),
   avoidIngredients: z.array(z.string()),
   desiredRiskLevels: z.array(z.enum(["safe", "bridge", "stretch", "adultForward"])),
@@ -74,6 +84,10 @@ const ShoppingListInputSchema = z.object({
   title: z.string().min(1).default("Dinner shopping list")
 });
 
+const HomeAssistantExportInputSchema = z.object({
+  itemIds: z.array(z.string().uuid()).optional()
+});
+
 export function createServer(database = AppDatabase.fromEnvironment()) {
   const app = Fastify({ logger: true });
   const mealAI = createMealAIService();
@@ -86,8 +100,27 @@ export function createServer(database = AppDatabase.fromEnvironment()) {
   app.get("/api/health", async () => ({
     ok: true,
     service: "family-meal-planner",
-    aiProvider: mealAIProvider
+    aiProvider: mealAIProvider,
+    homeAssistantConfigured: isHomeAssistantConfigured()
   }));
+
+  app.get("/api/home-assistant", async () => ({
+    configured: isHomeAssistantConfigured(),
+    url: getHomeAssistantUrl(),
+    todoEntityId: getHomeAssistantTodoEntityId()
+  }));
+
+  app.get("/api/home-assistant/shopping-list", async (request, reply) => {
+    try {
+      return { homeAssistant: await getHomeAssistantShoppingList() };
+    } catch (error) {
+      request.log.error({ error }, "Home Assistant shopping list read failed");
+      if (error instanceof HomeAssistantRequestError) {
+        return reply.code(502).send({ error: "Could not read the Home Assistant list." });
+      }
+      return reply.code(502).send({ error: "Could not read the Home Assistant list." });
+    }
+  });
 
   app.get("/api/children", async () => ({
     children: database.listChildren()
@@ -218,11 +251,66 @@ export function createServer(database = AppDatabase.fromEnvironment()) {
     return { shoppingList };
   });
 
+  app.post("/api/shopping-lists/:listId/export/home-assistant", async (request, reply) => {
+    const params = z.object({ listId: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+
+    const parsed = HomeAssistantExportInputSchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+
+    const shoppingList = database.listShoppingLists().find((list) => list.id === params.data.listId);
+    if (!shoppingList) return reply.code(404).send({ error: "Shopping list not found" });
+
+    try {
+      return {
+        homeAssistant: await sendShoppingListToHomeAssistant(shoppingList, parsed.data)
+      };
+    } catch (error) {
+      request.log.error({ error }, "Home Assistant shopping list export failed");
+      if (error instanceof HomeAssistantConfigurationError) {
+        return reply.code(503).send({ error: error.message });
+      }
+      if (error instanceof HomeAssistantRequestError) {
+        return reply.code(502).send({ error: "Home Assistant rejected the shopping list export." });
+      }
+      return reply.code(502).send({ error: "Could not send shopping list to Home Assistant." });
+    }
+  });
+
+  app.post("/api/meals/:id/export/home-assistant", async (request, reply) => {
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: params.error.flatten() });
+
+    const meal = database.getMeal(params.data.id);
+    if (!meal) return reply.code(404).send({ error: "Meal not found" });
+
+    try {
+      return {
+        homeAssistant: await sendShoppingListToHomeAssistant(
+          buildShoppingList([meal], `${meal.name} shopping list`)
+        )
+      };
+    } catch (error) {
+      request.log.error({ error }, "Home Assistant meal shopping list export failed");
+      if (error instanceof HomeAssistantConfigurationError) {
+        return reply.code(503).send({ error: error.message });
+      }
+      if (error instanceof HomeAssistantRequestError) {
+        return reply.code(502).send({ error: "Home Assistant rejected the recipe list export." });
+      }
+      return reply.code(502).send({ error: "Could not send recipe list to Home Assistant." });
+    }
+  });
+
   const distClient = findClientDist();
   if (distClient) {
     app.register(fastifyStatic, {
+      cacheControl: false,
       root: distClient,
-      prefix: "/"
+      prefix: "/",
+      setHeaders: (response, filePath) => {
+        response.setHeader("Cache-Control", getStaticCacheControl(filePath));
+      }
     });
 
     app.setNotFoundHandler((request, reply) => {
@@ -230,11 +318,26 @@ export function createServer(database = AppDatabase.fromEnvironment()) {
         reply.code(404).send({ error: "Not found" });
         return;
       }
-      reply.sendFile("index.html");
+      reply.header("Cache-Control", "no-cache").sendFile("index.html", { cacheControl: false });
     });
   }
 
   return app;
+}
+
+function getStaticCacheControl(filePath: string): string {
+  const fileName = path.basename(filePath);
+
+  if (fileName === "version.json") return "no-store";
+  if (fileName === "index.html") return "no-cache";
+  if (fileName === "sw.js" || fileName === "manifest.webmanifest" || fileName.startsWith("workbox-")) {
+    return "no-cache";
+  }
+  if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+    return "public, max-age=31536000, immutable";
+  }
+
+  return "public, max-age=3600";
 }
 
 function findClientDist(): string | null {

@@ -74,6 +74,8 @@ Rules:
 - Prefer shared base components with adult flavor added through sauces, toppings, herbs, heat, acid, or finishing steps.
 - Kid plates should be deconstructed and specific to each child.
 - Include safe fallback components when the child has known safe fallbacks.
+- Treat dinner guidance as broad intent. It may include ingredients, cuisine, cooking method, mood, leftovers, time pressure, or foods to avoid.
+- Use available ingredients when they are provided, but do not assume the guidance is only an inventory list.
 - Avoid recent meals and explicitly avoided ingredients.
 - Return the requested number of meals unless constraints make that impossible.
 - Keep names concrete and grocery-list friendly.
@@ -169,7 +171,10 @@ function mapAIKidPlate(plate: AIKidPlate, activeChildren: ChildProfile[]): KidPl
 function buildPromptPayload(request: MealGenerationRequest, activeChildren: ChildProfile[]) {
   return {
     task: "Generate family dinner meal suggestions.",
-    constraints: request.constraints,
+    constraints: {
+      ...request.constraints,
+      guidance: request.constraints.guidance
+    },
     activeChildren: activeChildren.map((child) => ({
       id: child.id,
       name: child.name,

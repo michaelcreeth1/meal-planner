@@ -1,5 +1,7 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
+ARG APP_VERSION
+ENV APP_VERSION=${APP_VERSION}
 COPY package*.json ./
 RUN npm ci
 COPY . .

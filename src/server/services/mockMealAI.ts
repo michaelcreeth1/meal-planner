@@ -239,7 +239,7 @@ function snackBoardMeal(children: ChildProfile[]): Meal {
 export class MockMealAIService {
   async generateMealSuggestions(request: MealGenerationRequest): Promise<MealGenerationResponse> {
     const activeChildren = request.family.children.filter((child) => !child.isArchived);
-    const ingredients = request.constraints.availableIngredients;
+    const ingredients = [...request.constraints.availableIngredients, request.constraints.guidance];
     const candidates: Meal[] = [];
 
     if (includesAny(ingredients, ["chicken"]) && includesAny(ingredients, ["rice"])) {

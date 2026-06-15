@@ -1,6 +1,9 @@
 services:
   meal-planner:
-    build: .
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-}
     container_name: meal-planner
     restart: unless-stopped
     ports:
@@ -14,6 +17,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.5}
       OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-low}
+      HOME_ASSISTANT_URL: ${HOME_ASSISTANT_URL:-http://ha.home.arpa}
+      HOME_ASSISTANT_TODO_ENTITY_ID: ${HOME_ASSISTANT_TODO_ENTITY_ID:-todo.safeway_list}
+      HOME_ASSISTANT_TOKEN: ${HOME_ASSISTANT_TOKEN:-}
     volumes:
       - ./data:/data
     healthcheck:

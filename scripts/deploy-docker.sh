@@ -9,8 +9,11 @@ REMOTE_RELEASE_DIR="${REMOTE_DIR}/.incoming-$(date +%s)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || printf 'nogit')"
+DEPLOY_VERSION="${APP_VERSION:-${GIT_SHA}-$(date -u +%Y%m%d%H%M%S)}"
 
 printf 'Deploying meal planner to %s:%s\n' "${REMOTE_HOST}" "${REMOTE_DIR}"
+printf 'Build version: %s\n' "${DEPLOY_VERSION}"
 
 ssh "${REMOTE_HOST}" "mkdir -p '${REMOTE_DIR}/data' '${REMOTE_RELEASE_DIR}'"
 COPYFILE_DISABLE=1 tar \
@@ -34,7 +37,8 @@ if [ -f "${REPO_ROOT}/.env" ]; then
   ssh "${REMOTE_HOST}" "mv '${REMOTE_DIR}/.env.tmp' '${REMOTE_DIR}/.env' && chmod 600 '${REMOTE_DIR}/.env'"
 fi
 ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && docker compose config >/dev/null"
-ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && docker compose up -d --build"
+ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && docker compose build --build-arg APP_VERSION='${DEPLOY_VERSION}' meal-planner"
+ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && docker compose up -d meal-planner"
 
 printf '\nWaiting for health check at %s on %s\n' "${SERVICE_URL}" "${REMOTE_HOST}"
 ssh "${REMOTE_HOST}" "for i in \$(seq 1 30); do if curl -fsS '${SERVICE_URL}' >/dev/null; then exit 0; fi; sleep 2; done; exit 1"
@@ -44,3 +48,5 @@ ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && docker compose ps"
 
 printf '\nRecent logs:\n'
 ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && docker compose logs --tail=40 meal-planner"
+printf '\nBuilt version.json:\n'
+ssh "${REMOTE_HOST}" "cd '${REMOTE_DIR}' && docker compose exec -T meal-planner cat /app/dist/client/version.json"

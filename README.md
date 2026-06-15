@@ -32,6 +32,20 @@ OPENAI_REASONING_EFFORT=low
 
 `OPENAI_API_KEY` belongs in `.env`, which is gitignored. For this private LAN/Tailscale deployment, the key stays on the Docker host and is never exposed to the PWA.
 
+## Home Assistant Shopping List
+
+The app can send unchecked generated shopping-list items to Home Assistant's built-in Shopping list integration.
+
+Create a Home Assistant long-lived access token from your Home Assistant profile, then add it to `.env`:
+
+```sh
+HOME_ASSISTANT_URL=http://ha.home.arpa
+HOME_ASSISTANT_TODO_ENTITY_ID=todo.safeway_list
+HOME_ASSISTANT_TOKEN=your-long-lived-access-token
+```
+
+The backend calls Home Assistant's `todo.add_item` action for the Safeway list through the REST API. The token stays on the Docker host and is never exposed to the PWA.
+
 ## Docker
 
 ```sh

@@ -1,13 +1,33 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const packageJson = require("./package.json") as { version: string };
+const appVersion = process.env.APP_VERSION?.trim();
+const viteAppVersion = process.env.VITE_APP_VERSION?.trim();
+const buildVersion =
+  appVersion ||
+  viteAppVersion ||
+  `${packageJson.version}-${new Date().toISOString()}`;
 
 export default defineConfig({
   plugins: [
     react(),
+    {
+      name: "build-version",
+      generateBundle() {
+        this.emitFile({
+          type: "asset",
+          fileName: "version.json",
+          source: `${JSON.stringify({ version: buildVersion })}\n`
+        });
+      }
+    },
     VitePWA({
-      registerType: "autoUpdate",
-      injectRegister: "auto",
+      registerType: "prompt",
+      injectRegister: null,
       includeAssets: ["icons/icon.svg"],
       manifest: {
         name: "Family Meal Planner",
@@ -32,6 +52,7 @@ export default defineConfig({
         clientsClaim: true,
         cleanupOutdatedCaches: true,
         navigateFallback: "/index.html",
+        navigateFallbackDenylist: [/^\/api(?:\/|$)/],
         globPatterns: ["**/*.{js,css,html,svg,png,ico}"]
       }
     })

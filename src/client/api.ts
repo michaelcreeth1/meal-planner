@@ -4,6 +4,7 @@ import {
   DinnerResult,
   FoodPreference,
   FoodTag,
+  HomeAssistantShoppingList,
   Meal,
   MealGenerationResponse,
   MealRiskLevel,
@@ -12,12 +13,14 @@ import {
 } from "../shared/domain";
 
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (options.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
   const response = await fetch(url, {
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers
-    },
-    ...options
+    ...options,
+    headers
   });
 
   if (!response.ok) {
@@ -60,6 +63,7 @@ export const api = {
   generateMeals: (constraints: {
     numberOfMeals: number;
     maxCookTimeMinutes: number | null;
+    guidance: string;
     availableIngredients: string[];
     avoidIngredients: string[];
     desiredRiskLevels: MealRiskLevel[];
@@ -93,6 +97,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  homeAssistantShoppingList: () =>
+    request<{ homeAssistant: HomeAssistantShoppingList }>("/api/home-assistant/shopping-list"),
   shoppingLists: () => request<{ shoppingLists: ShoppingList[] }>("/api/shopping-lists"),
   createShoppingList: (mealIds: string[], title = "Dinner shopping list") =>
     request<{ shoppingList: ShoppingList }>("/api/shopping-lists", {
@@ -103,5 +109,30 @@ export const api = {
     request<{ shoppingList: ShoppingList }>(
       `/api/shopping-lists/${listId}/items/${itemId}/toggle`,
       { method: "POST" }
-    )
+    ),
+  sendShoppingListToHomeAssistant: (listId: string, itemIds: string[]) =>
+    request<{
+      homeAssistant: {
+        addedCount: number;
+        duplicateCount: number;
+        skippedCount: number;
+        items: string[];
+        duplicates: string[];
+      };
+    }>(`/api/shopping-lists/${listId}/export/home-assistant`, {
+      method: "POST",
+      body: JSON.stringify({ itemIds })
+    }),
+  sendMealShoppingListToHomeAssistant: (mealId: string) =>
+    request<{
+      homeAssistant: {
+        addedCount: number;
+        duplicateCount: number;
+        skippedCount: number;
+        items: string[];
+        duplicates: string[];
+      };
+    }>(`/api/meals/${mealId}/export/home-assistant`, {
+      method: "POST"
+    })
 };

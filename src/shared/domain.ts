@@ -172,6 +172,7 @@ export const MealSchema = z.object({
 export const PlanningConstraintsSchema = z.object({
   numberOfMeals: z.number().int().min(1).max(7),
   maxCookTimeMinutes: z.number().int().positive().nullable(),
+  guidance: z.string(),
   availableIngredients: z.array(z.string()),
   avoidIngredients: z.array(z.string()),
   desiredRiskLevels: z.array(MealRiskLevelSchema),
@@ -231,6 +232,20 @@ export const ShoppingListSchema = z.object({
   items: z.array(ShoppingListItemSchema)
 });
 
+export const HomeAssistantShoppingListItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  status: z.string().nullable()
+});
+
+export const HomeAssistantShoppingListSchema = z.object({
+  configured: z.boolean(),
+  title: z.string(),
+  url: z.string(),
+  todoEntityId: z.string(),
+  items: z.array(HomeAssistantShoppingListItemSchema)
+});
+
 export type FoodPreference = z.infer<typeof FoodPreferenceSchema>;
 export type ChildProfile = z.infer<typeof ChildProfileSchema>;
 export type MealComponent = z.infer<typeof MealComponentSchema>;
@@ -243,11 +258,14 @@ export type FoodExposureResult = z.infer<typeof FoodExposureResultSchema>;
 export type DinnerResult = z.infer<typeof DinnerResultSchema>;
 export type ShoppingListItem = z.infer<typeof ShoppingListItemSchema>;
 export type ShoppingList = z.infer<typeof ShoppingListSchema>;
+export type HomeAssistantShoppingListItem = z.infer<typeof HomeAssistantShoppingListItemSchema>;
+export type HomeAssistantShoppingList = z.infer<typeof HomeAssistantShoppingListSchema>;
 
 export function emptyConstraints(): PlanningConstraints {
   return {
     numberOfMeals: 3,
     maxCookTimeMinutes: 45,
+    guidance: "",
     availableIngredients: [],
     avoidIngredients: [],
     desiredRiskLevels: ["bridge"],

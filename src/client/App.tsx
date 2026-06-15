@@ -8,20 +8,22 @@ import {
   ClipboardList,
   Home,
   Plus,
+  RefreshCw,
   Save,
   ShieldCheck,
   Sparkles,
   Utensils
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { registerSW } from "virtual:pwa-register";
 import { api } from "./api";
 import {
   ChildProfile,
   DinnerOutcome,
   FoodPreferenceStatus,
+  HomeAssistantShoppingList,
   Meal,
   MealRiskLevel,
-  ShoppingList,
   dinnerOutcomes,
   foodPreferenceStatuses,
   humanizeEnum,
@@ -52,26 +54,130 @@ const statusGroups: FoodPreferenceStatus[] = [
   "unknown"
 ];
 
+const VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+type UpdateServiceWorker = ReturnType<typeof registerSW>;
+
+function useAppUpdate() {
+  const [isUpdateAvailable, setIsUpdateAvailable] = useState(false);
+  const [registration, setRegistration] = useState<ServiceWorkerRegistration | null>(null);
+  const [updateServiceWorker, setUpdateServiceWorker] = useState<UpdateServiceWorker | null>(null);
+  const currentVersionRef = useRef<string | null>(null);
+  const isReloadingRef = useRef(false);
+
+  const reloadPage = useCallback(() => {
+    if (isReloadingRef.current) return;
+    isReloadingRef.current = true;
+    window.location.reload();
+  }, []);
+
+  const showUpdatePrompt = useCallback(() => {
+    setIsUpdateAvailable(true);
+  }, []);
+
+  useEffect(() => {
+    const updateWorker = registerSW({
+      immediate: true,
+      onNeedRefresh: showUpdatePrompt,
+      onNeedReload: reloadPage,
+      onRegisteredSW: (_swScriptUrl, registeredServiceWorker) => {
+        setRegistration(registeredServiceWorker ?? null);
+      },
+      onRegisterError: (error) => {
+        console.error("Service worker registration failed", error);
+      }
+    });
+
+    setUpdateServiceWorker(() => updateWorker);
+  }, [reloadPage, showUpdatePrompt]);
+
+  useEffect(() => {
+    let isDisposed = false;
+
+    async function checkVersion() {
+      try {
+        const response = await fetch(`/version.json?t=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) return;
+
+        const payload = (await response.json()) as { version?: string };
+        if (!payload.version || isDisposed) return;
+
+        if (currentVersionRef.current && currentVersionRef.current !== payload.version) {
+          showUpdatePrompt();
+          await registration?.update();
+        }
+
+        currentVersionRef.current = payload.version;
+      } catch (error) {
+        console.warn("Could not check app version", error);
+      }
+    }
+
+    function checkWhenVisible() {
+      if (document.visibilityState === "visible") {
+        void checkVersion();
+      }
+    }
+
+    void checkVersion();
+    const interval = window.setInterval(checkVersion, VERSION_CHECK_INTERVAL_MS);
+    window.addEventListener("focus", checkVersion);
+    window.addEventListener("app-controller-change", showUpdatePrompt);
+    document.addEventListener("visibilitychange", checkWhenVisible);
+
+    return () => {
+      isDisposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", checkVersion);
+      window.removeEventListener("app-controller-change", showUpdatePrompt);
+      document.removeEventListener("visibilitychange", checkWhenVisible);
+    };
+  }, [registration, showUpdatePrompt]);
+
+  const updateApp = useCallback(async () => {
+    const latestRegistration = await registration?.update().catch(() => registration);
+    if (latestRegistration?.waiting && updateServiceWorker) {
+      await updateServiceWorker(true);
+      window.setTimeout(reloadPage, 1500);
+      return;
+    }
+
+    reloadPage();
+  }, [registration, reloadPage, updateServiceWorker]);
+
+  return { isUpdateAvailable, updateApp };
+}
+
 export function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [children, setChildren] = useState<ChildProfile[]>([]);
   const [meals, setMeals] = useState<Meal[]>([]);
   const [generatedMeals, setGeneratedMeals] = useState<Meal[]>([]);
-  const [shoppingLists, setShoppingLists] = useState<ShoppingList[]>([]);
+  const [homeAssistantList, setHomeAssistantList] = useState<HomeAssistantShoppingList | null>(null);
   const [activeMeal, setActiveMeal] = useState<Meal | null>(null);
   const [loggingMeal, setLoggingMeal] = useState<Meal | null>(null);
   const [message, setMessage] = useState("");
   const [isBusy, setIsBusy] = useState(false);
+  const { isUpdateAvailable, updateApp } = useAppUpdate();
 
   async function refresh() {
-    const [childrenResponse, mealsResponse, shoppingResponse] = await Promise.all([
+    const [childrenResponse, mealsResponse] = await Promise.all([
       api.children(),
-      api.meals(),
-      api.shoppingLists()
+      api.meals()
     ]);
     setChildren(childrenResponse.children);
     setMeals(mealsResponse.meals);
-    setShoppingLists(shoppingResponse.shoppingLists);
+    await refreshHomeAssistantList();
+  }
+
+  async function refreshHomeAssistantList() {
+    try {
+      const response = await api.homeAssistantShoppingList();
+      setHomeAssistantList(response.homeAssistant);
+    } catch (error) {
+      setHomeAssistantList(null);
+      setMessage(error instanceof Error ? error.message : "Could not read the Home Assistant list.");
+    }
   }
 
   useEffect(() => {
@@ -115,12 +221,19 @@ export function App() {
         </button>
       ) : null}
 
+      {isUpdateAvailable ? (
+        <button className="update-toast" type="button" onClick={updateApp}>
+          <RefreshCw aria-hidden="true" />
+          <span>Update available &mdash; tap to reload</span>
+        </button>
+      ) : null}
+
       <main>
         {tab === "home" ? (
           <HomeView
             children={children}
             meals={meals}
-            shoppingLists={shoppingLists}
+            homeAssistantList={homeAssistantList}
             onNavigate={setTab}
           />
         ) : null}
@@ -144,21 +257,34 @@ export function App() {
             onViewMeal={setActiveMeal}
             onLogMeal={setLoggingMeal}
             onShoppingList={async (meal) => {
-              const response = await api.createShoppingList([meal.id], `${meal.name} shopping list`);
-              setShoppingLists((current) => [response.shoppingList, ...current]);
-              setTab("shopping");
-              setMessage("Shopping list created.");
+              setIsBusy(true);
+              try {
+                const response = await api.sendMealShoppingListToHomeAssistant(meal.id);
+                const { addedCount, duplicateCount } = response.homeAssistant;
+                await refreshHomeAssistantList();
+                setTab("shopping");
+                setMessage(formatHomeAssistantExportMessage(addedCount, duplicateCount));
+              } catch (error) {
+                setMessage(
+                  error instanceof Error ? error.message : "Could not add recipe list to Home Assistant."
+                );
+              } finally {
+                setIsBusy(false);
+              }
             }}
           />
         ) : null}
         {tab === "shopping" ? (
           <ShoppingView
-            shoppingLists={shoppingLists}
-            onToggle={async (listId, itemId) => {
-              const response = await api.toggleShoppingItem(listId, itemId);
-              setShoppingLists((current) =>
-                current.map((list) => (list.id === listId ? response.shoppingList : list))
-              );
+            isBusy={isBusy}
+            homeAssistantList={homeAssistantList}
+            onRefresh={async () => {
+              setIsBusy(true);
+              try {
+                await refreshHomeAssistantList();
+              } finally {
+                setIsBusy(false);
+              }
             }}
           />
         ) : null}
@@ -203,15 +329,28 @@ function headlineFor(tab: Tab): string {
   }[tab];
 }
 
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes}:${remainder.toString().padStart(2, "0")}`;
+}
+
+function formatHomeAssistantExportMessage(addedCount: number, duplicateCount: number): string {
+  if (addedCount === 0 && duplicateCount > 0) return "Those recipe items are already on the list.";
+  if (addedCount === 0) return "No recipe items were added.";
+  return `Added ${addedCount} item${addedCount === 1 ? "" : "s"} to Home Assistant.`;
+}
+
 function HomeView({
   children,
   meals,
-  shoppingLists,
+  homeAssistantList,
   onNavigate
 }: {
   children: ChildProfile[];
   meals: Meal[];
-  shoppingLists: ShoppingList[];
+  homeAssistantList: HomeAssistantShoppingList | null;
   onNavigate: (tab: Tab) => void;
 }) {
   const foodCount = children.reduce((count, child) => count + child.foodPreferences.length, 0);
@@ -221,7 +360,7 @@ function HomeView({
     <section className="stack home-stack">
       <section className="dinner-command">
         <p className="command-kicker">Dinner command center</p>
-        <h2>What should we make tonight?</h2>
+        <h2>What should we make tonight, Mavis?</h2>
         <p>Start with the real constraint: what is in the kitchen and what Charlotte and James can handle.</p>
         <button className="home-primary-cta" type="button" onClick={() => onNavigate("plan")}>
           <Utensils aria-hidden="true" />
@@ -231,7 +370,7 @@ function HomeView({
       </section>
 
       <div className="secondary-actions">
-        <ActionButton icon={<Sparkles />} label="Use ingredients I have" onClick={() => onNavigate("plan")} />
+        <ActionButton icon={<Sparkles />} label="Give dinner guidance" onClick={() => onNavigate("plan")} />
         <ActionButton icon={<BookOpen />} label="Pick from saved meals" onClick={() => onNavigate("meals")} />
         <ActionButton icon={<Baby />} label="Update kid food profiles" onClick={() => onNavigate("kids")} />
       </div>
@@ -251,7 +390,7 @@ function HomeView({
       <section className="home-status">
         <Metric label="Food notes" value={foodCount.toString()} />
         <Metric label="Saved meals" value={meals.length.toString()} />
-        <Metric label="Shopping lists" value={shoppingLists.length.toString()} />
+        <Metric label="List items" value={(homeAssistantList?.items.length ?? 0).toString()} />
       </section>
     </section>
   );
@@ -520,28 +659,71 @@ function PlanView({
   const [numberOfMeals, setNumberOfMeals] = useState(3);
   const [maxCookTimeMinutes, setMaxCookTimeMinutes] = useState(45);
   const [riskLevel, setRiskLevel] = useState<MealRiskLevel>("bridge");
-  const [availableIngredients, setAvailableIngredients] = useState("");
+  const [guidance, setGuidance] = useState("");
   const [avoidIngredients, setAvoidIngredients] = useState("");
   const [notes, setNotes] = useState("Adult-interesting, kid plates deconstructed.");
+  const [generationTotal, setGenerationTotal] = useState(0);
+  const [generationCompleted, setGenerationCompleted] = useState(0);
+  const [generationStep, setGenerationStep] = useState("");
+  const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  useEffect(() => {
+    if (!isGenerating || generationTotal === 0) return;
+    setGenerationElapsedSeconds(0);
+    const startedAt = Date.now();
+    const interval = window.setInterval(() => {
+      setGenerationElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [generationTotal, isGenerating]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    const targetMealCount = Math.max(1, Math.min(7, numberOfMeals));
     setBusy(true);
+    setIsGenerating(true);
+    setGeneratedMeals([]);
+    setGenerationTotal(targetMealCount);
+    setGenerationCompleted(0);
+    setGenerationStep("Reading your constraints");
+    let completedCount = 0;
     try {
-      const response = await api.generateMeals({
-        numberOfMeals,
-        maxCookTimeMinutes,
-        availableIngredients: splitCsv(availableIngredients),
-        avoidIngredients: splitCsv(avoidIngredients),
-        desiredRiskLevels: [riskLevel],
-        parentPreferences: ["adult-interesting", "deconstructed", "sauces on side"],
-        notes
-      });
-      setGeneratedMeals(response.meals);
-      setMessage(`Generated ${response.meals.length} meal suggestion${response.meals.length === 1 ? "" : "s"}.`);
+      const nextMeals: Meal[] = [];
+      for (let index = 0; index < targetMealCount; index += 1) {
+        setGenerationStep(`Generating dinner ${index + 1} of ${targetMealCount}`);
+        const batchContext =
+          nextMeals.length > 0
+            ? `\nAlready suggested in this batch: ${nextMeals.map((meal) => meal.name).join(", ")}. Do not repeat these meals.`
+            : "";
+        const response = await api.generateMeals({
+          numberOfMeals: 1,
+          maxCookTimeMinutes,
+          guidance,
+          availableIngredients: splitCsv(guidance),
+          avoidIngredients: splitCsv(avoidIngredients),
+          desiredRiskLevels: [riskLevel],
+          parentPreferences: ["adult-interesting", "deconstructed", "sauces on side"],
+          notes: `${notes}${batchContext}`
+        });
+        const meal = response.meals[0];
+        if (meal) {
+          nextMeals.push(meal);
+          setGeneratedMeals([...nextMeals]);
+        }
+        completedCount = index + 1;
+        setGenerationCompleted(completedCount);
+      }
+      setGenerationStep("Done");
+      setMessage(`Generated ${nextMeals.length} meal suggestion${nextMeals.length === 1 ? "" : "s"}.`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not generate meals.");
+      setMessage(
+        error instanceof Error
+          ? `${completedCount}/${targetMealCount} complete. ${error.message}`
+          : `${completedCount}/${targetMealCount} complete. Could not generate meals.`
+      );
     } finally {
+      setIsGenerating(false);
       setBusy(false);
     }
   }
@@ -549,13 +731,13 @@ function PlanView({
   return (
     <section className="stack">
       <form className="panel form generator-panel" onSubmit={submit}>
-        <h2>Use ingredients I have</h2>
+        <h2>What sounds good?</h2>
         <label>
-          Available ingredients
+          Dinner guidance
           <textarea
-            placeholder="chicken thighs, rice, cucumber, tortillas"
-            value={availableIngredients}
-            onChange={(event) => setAvailableIngredients(event.target.value)}
+            placeholder="Thai-ish, use the chicken thighs, something grillable, no soup, Costco rotisserie chicken"
+            value={guidance}
+            onChange={(event) => setGuidance(event.target.value)}
           />
         </label>
         <div className="form-grid">
@@ -598,8 +780,17 @@ function PlanView({
           <textarea value={notes} onChange={(event) => setNotes(event.target.value)} />
         </label>
         <button className="primary-button" type="submit" disabled={isBusy}>
-          <Sparkles aria-hidden="true" /> {isBusy ? "Generating..." : "Generate meals"}
+          <Sparkles aria-hidden="true" />{" "}
+          {isGenerating ? `Generating ${generationCompleted}/${generationTotal}` : "Generate meals"}
         </button>
+        {isGenerating ? (
+          <GenerationProgress
+            completed={generationCompleted}
+            elapsedSeconds={generationElapsedSeconds}
+            step={generationStep}
+            total={generationTotal}
+          />
+        ) : null}
       </form>
 
       <div className="meal-list">
@@ -614,6 +805,32 @@ function PlanView({
         ))}
       </div>
     </section>
+  );
+}
+
+function GenerationProgress({
+  completed,
+  elapsedSeconds,
+  step,
+  total
+}: {
+  completed: number;
+  elapsedSeconds: number;
+  step: string;
+  total: number;
+}) {
+  const percent = total > 0 ? Math.max(5, Math.round((completed / total) * 100)) : 5;
+  return (
+    <div className="generation-progress" aria-live="polite">
+      <div className="generation-progress-header">
+        <span>{completed}/{total} complete</span>
+        <span>{formatElapsed(elapsedSeconds)}</span>
+      </div>
+      <div className="generation-progress-track" aria-hidden="true">
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <p>{step || "Working on it"}</p>
+    </div>
   );
 }
 
@@ -697,7 +914,7 @@ function MealCard({
         </button>
         {extraAction ? (
           <button className="secondary-button" type="button" onClick={extraAction}>
-            List
+            Add to list
           </button>
         ) : null}
         <button className="primary-button compact" type="button" onClick={onPrimary}>
@@ -854,43 +1071,104 @@ function DinnerLogger({
 }
 
 function ShoppingView({
-  shoppingLists,
-  onToggle
+  isBusy,
+  homeAssistantList,
+  onRefresh
 }: {
-  shoppingLists: ShoppingList[];
-  onToggle: (listId: string, itemId: string) => void;
+  isBusy: boolean;
+  homeAssistantList: HomeAssistantShoppingList | null;
+  onRefresh: () => Promise<void>;
 }) {
-  const list = shoppingLists[0];
-  if (!list) {
-    return <EmptyState title="No shopping list yet" body="Create one from a saved meal." />;
+  if (!homeAssistantList) {
+    return (
+      <section className="stack">
+        <EmptyState title="List unavailable" body="Could not read the Home Assistant list." />
+        <button className="secondary-button" type="button" disabled={isBusy} onClick={onRefresh}>
+          <RefreshCw aria-hidden="true" />
+          Refresh
+        </button>
+      </section>
+    );
   }
 
-  const categories = [...new Set(list.items.map((item) => item.category))];
+  if (!homeAssistantList.configured) {
+    return (
+      <EmptyState
+        title="Home Assistant is not configured"
+        body="Set HOME_ASSISTANT_TOKEN on the backend to show the shared list."
+      />
+    );
+  }
+
+  const statusGroups = groupHomeAssistantItems(homeAssistantList.items);
+
   return (
     <section className="stack">
       <section className="panel">
-        <h2>{list.title}</h2>
-        {categories.map((category) => (
-          <div className="shopping-group" key={category}>
-            <h3>{humanizeEnum(category)}</h3>
-            {list.items
-              .filter((item) => item.category === category)
-              .map((item) => (
-                <button
-                  key={item.id}
-                  className={`shopping-item ${item.isChecked ? "checked" : ""}`}
-                  type="button"
-                  onClick={() => onToggle(list.id, item.id)}
-                >
-                  <span>{item.isChecked ? "✓" : ""}</span>
-                  {item.name}
-                </button>
-              ))}
+        <div className="shopping-header">
+          <div>
+            <h2>{homeAssistantList.title}</h2>
+            <p>
+              {homeAssistantList.items.length} item{homeAssistantList.items.length === 1 ? "" : "s"} from{" "}
+              {homeAssistantList.todoEntityId}
+            </p>
           </div>
-        ))}
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={isBusy}
+            onClick={onRefresh}
+          >
+            <RefreshCw aria-hidden="true" />
+            Refresh
+          </button>
+        </div>
+        {statusGroups.length === 0 ? (
+          <p className="shopping-empty">No items are on the Home Assistant list.</p>
+        ) : (
+          statusGroups.map(({ status, items }) => (
+            <div className="shopping-group" key={status}>
+              <h3>{formatHomeAssistantStatus(status)}</h3>
+              {items.map((item) => (
+                <div key={item.id} className={`shopping-item status-${item.status ?? "unknown"}`}>
+                  <span>{item.name}</span>
+                  {item.status ? (
+                    <span className="shopping-status">{formatHomeAssistantStatus(item.status)}</span>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ))
+        )}
       </section>
     </section>
   );
+}
+
+function groupHomeAssistantItems(items: HomeAssistantShoppingList["items"]) {
+  const order = ["needs_action", "completed"];
+  const groups = new Map<string, HomeAssistantShoppingList["items"]>();
+
+  for (const item of items) {
+    const status = item.status ?? "unknown";
+    groups.set(status, [...(groups.get(status) ?? []), item]);
+  }
+
+  return [...groups.entries()]
+    .sort(([left], [right]) => {
+      const leftIndex = order.indexOf(left);
+      const rightIndex = order.indexOf(right);
+      if (leftIndex === -1 && rightIndex === -1) return left.localeCompare(right);
+      if (leftIndex === -1) return 1;
+      if (rightIndex === -1) return -1;
+      return leftIndex - rightIndex;
+    })
+    .map(([status, items]) => ({ status, items }));
+}
+
+function formatHomeAssistantStatus(status: string): string {
+  if (status === "needs_action") return "Needs action";
+  return humanizeEnum(status);
 }
 
 function TabBar({ active, onChange }: { active: Tab; onChange: (tab: Tab) => void }) {

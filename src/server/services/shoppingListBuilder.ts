@@ -29,24 +29,71 @@ function item(
   sourceMealName: string,
   options: Partial<ShoppingListItem> = {}
 ): ShoppingListItem {
+  const normalizedName = normalizeShoppingListItemName(name);
   const isOptionalAdultUpgrade = Boolean(options.isOptionalAdultUpgrade);
   const isKidFallback = Boolean(options.isKidFallback);
   return {
     id: randomUUID(),
-    name,
+    name: normalizedName,
     category:
       options.category ??
       (isOptionalAdultUpgrade
         ? "optionalAdultUpgrades"
         : isKidFallback
           ? "kidSafeFallbacks"
-          : categorize(name)),
+          : categorize(normalizedName)),
     quantity: options.quantity ?? null,
     sourceMealName,
     isChecked: false,
     isOptionalAdultUpgrade,
     isKidFallback
   };
+}
+
+export function normalizeShoppingListItemName(name: string): string {
+  const leadingDescriptors = new Set([
+    "warm",
+    "plain",
+    "cooked",
+    "raw",
+    "sliced",
+    "diced",
+    "chopped",
+    "shredded",
+    "crunchy",
+    "mild",
+    "spicy",
+    "toasted",
+    "soft",
+    "small",
+    "tiny",
+    "fresh",
+    "sauteed",
+    "roasted",
+    "grilled"
+  ]);
+  const trailingForms = new Set([
+    "pieces",
+    "piece",
+    "sticks",
+    "stick",
+    "slices",
+    "slice",
+    "strips",
+    "strip",
+    "wedges",
+    "wedge",
+    "chunks",
+    "chunk"
+  ]);
+  const words = name.trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
+  while (words.length > 1 && leadingDescriptors.has(words[0]!.toLowerCase())) {
+    words.shift();
+  }
+  while (words.length > 1 && trailingForms.has(words[words.length - 1]!.toLowerCase())) {
+    words.pop();
+  }
+  return words.join(" ") || name.trim();
 }
 
 export function buildShoppingList(meals: Meal[], title = "Dinner shopping list"): ShoppingList {
